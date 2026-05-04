@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from statistics import median
-from typing import Iterable
+from typing import Callable, Iterable
 class AnalysisError(Exception):
     """Raised when input data is missing or malformed."""
 class SkipLearnPayload(AnalysisError):
@@ -129,11 +129,19 @@ class DecodeStrategyCandidate:
     mark_type: int
     zero_type: int
     one_type: int
+
+
+def emit_progress(progress: Callable[[str], None] | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
+
+
 def analyze_brand_directory(
     brand_dir: Path,
     output_dir: Path | None = None,
     manifest_path: Path | None = None,
     legacy_description: Path | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> None:
     brand_dir = brand_dir.resolve()
     if not brand_dir.is_dir():
@@ -144,14 +152,24 @@ def analyze_brand_directory(
     output_dir = (output_dir or (brand_dir / OUTPUT_DIR_NAME)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifest_path or detect_manifest(report_dir)
+    emit_progress(progress, f"Preparing analysis for brand '{brand_dir.name}'")
+    emit_progress(progress, f"Scanning input directory {report_dir}")
     source_packet_rows: list[SourcePacketRow] = []
     if manifest_path is not None:
-        samples, mode_label, notes = load_manifest_samples(brand_dir, manifest_path)
+        emit_progress(progress, f"Detected manifest mode: {manifest_path}")
+        samples, mode_label, notes = load_manifest_samples(
+            brand_dir,
+            manifest_path,
+            progress=progress,
+        )
     else:
+        emit_progress(progress, "Detected legacy auto-split mode")
         samples, mode_label, notes = load_legacy_samples(
             report_dir=report_dir,
             legacy_description=legacy_description,
+            progress=progress,
         )
+        emit_progress(progress, "Building per-source channel summary from legacy inputs")
         source_packet_rows = build_legacy_source_packet_rows(
             report_dir=report_dir,
             legacy_description=legacy_description,
@@ -159,8 +177,17 @@ def analyze_brand_directory(
     commands = [command for sample in samples for command in sample.commands]
     if not commands:
         raise AnalysisError("No Learn payloads were loaded.")
+    emit_progress(
+        progress,
+        "Loaded "
+        f"{len(samples)} sample groups and {len(commands)} Learn payloads"
+        + (f"; recovered {len(source_packet_rows)} source channels" if source_packet_rows else ""),
+    )
+    emit_progress(progress, f"Inferring fields from {len(commands)} parsed payloads")
     field_inferences = infer_fields(commands)
+    emit_progress(progress, f"Derived {len(field_inferences)} field observations")
     field_notes = {item.field_key: f"{item.status} {item.meaning}" for item in field_inferences}
+    emit_progress(progress, "Rendering markdown report")
     markdown = render_markdown_report(
         brand_name=brand_dir.name,
         mode_label=mode_label,
@@ -170,9 +197,12 @@ def analyze_brand_directory(
         field_inferences=field_inferences,
         source_packet_rows=source_packet_rows,
     )
+    emit_progress(progress, "Rendering TSV breakdown")
     tsv_text = render_tsv(commands, field_notes)
+    emit_progress(progress, f"Writing report files into {output_dir}")
     (output_dir / REPORT_NAME).write_text(markdown, encoding="utf-8")
     (output_dir / TSV_NAME).write_text(tsv_text, encoding="utf-8")
+    emit_progress(progress, f"Wrote {REPORT_NAME} and {TSV_NAME} to {output_dir}")
 def detect_manifest(report_dir: Path) -> Path | None:
     candidate = report_dir / MANIFEST_NAME
     return candidate if candidate.is_file() else None
@@ -330,6 +360,7 @@ def _deprecated_parse_legacy_description_v1(text: str) -> dict[str, str]:
 def load_legacy_samples(
     report_dir: Path,
     legacy_description: Path | None,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[list[LoadedSample], str, list[str]]:
     description_path = legacy_description or (report_dir / LEGACY_DESCRIPTION_NAME)
     description_text = read_text_auto(description_path) if description_path.is_file() else ""
@@ -341,6 +372,15 @@ def load_legacy_samples(
     )
     if not report_files:
         raise AnalysisError(f"No legacy report files found in {report_dir}")
+    emit_progress(
+        progress,
+        f"Found {len(report_files)} legacy report files"
+        + (
+            f"; using description file {description_path.name}"
+            if description_path.is_file()
+            else "; no description file provided"
+        ),
+    )
     raw_commands: list[CommandSample] = []
     skipped_learns: list[str] = []
     for report_file in report_files:
@@ -349,6 +389,9 @@ def load_legacy_samples(
             (key for key in payloads if key.endswith("Code")),
             key=lambda item: extract_learn_number(item) or 0,
         )
+        file_loaded = 0
+        file_skipped = 0
+        emit_progress(progress, f"Parsing {report_file.name}: detected {len(keys)} Learn entries")
         for learn_key in keys:
             description = resolve_legacy_description(description_map, report_file, learn_key)
             if description is None:
@@ -364,12 +407,27 @@ def load_legacy_samples(
             )
             if command_sample is None:
                 skipped_learns.append(f"{report_file.name}:{learn_key}")
+                file_skipped += 1
                 continue
             raw_commands.append(command_sample)
+            file_loaded += 1
+        emit_progress(
+            progress,
+            f"Parsed {report_file.name}: kept {file_loaded}, skipped {file_skipped}, cumulative payloads {len(raw_commands)}",
+        )
     if not raw_commands:
         raise AnalysisError("No valid Learn payloads were loaded after skipping empty/all-FF entries.")
     grouped_samples = auto_split_legacy_samples(raw_commands)
     if grouped_samples:
+        emit_progress(
+            progress,
+            "Auto-split result: "
+            + ", ".join(
+                f"{group}={len(grouped_samples[group])}"
+                for group in AUTO_SPLIT_GROUP_ORDER
+                if group in grouped_samples
+            ),
+        )
         loaded_samples = build_loaded_samples_from_grouped_commands(grouped_samples)
         notes = [
             "Input mode: legacy-auto-split",
@@ -712,6 +770,7 @@ def loaded_samples_by_kind(samples: list[LoadedSample]) -> list[str]:
 def load_manifest_samples(
     brand_dir: Path,
     manifest_path: Path,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[list[LoadedSample], str, list[str]]:
     manifest_data = json.loads(read_text_auto(manifest_path))
     samples_node = manifest_data.get("samples")
@@ -721,6 +780,7 @@ def load_manifest_samples(
     missing = [name for name in required if name not in samples_node]
     if missing:
         raise AnalysisError(f"Missing required samples in manifest: {', '.join(missing)}")
+    emit_progress(progress, f"Loaded manifest with required groups: {', '.join(required)}")
     loaded_samples: list[LoadedSample] = []
     skipped_learns: list[str] = []
     for sample_kind in required:
@@ -736,9 +796,14 @@ def load_manifest_samples(
         description = str(sample_node.get("description", sample_kind))
         payloads = parse_learn_payloads(file_path)
         selected = resolve_learn_selection(payloads, sample_node.get("learn_map"))
+        emit_progress(
+            progress,
+            f"Manifest group {sample_kind}: source {file_path.name}, selected {len(selected)} of {len([key for key in payloads if key.endswith('Code')])} Learn entries",
+        )
         if not selected:
             raise AnalysisError(f"No Learn payloads selected from {file_path}")
         commands: list[CommandSample] = []
+        group_skipped = 0
         for alias, learn_key in selected:
             command_sample = try_build_command_sample(
                 sample_kind=sample_kind,
@@ -751,12 +816,17 @@ def load_manifest_samples(
             )
             if command_sample is None:
                 skipped_learns.append(f"{file_path.name}:{learn_key}")
+                group_skipped += 1
                 continue
             commands.append(command_sample)
         if not commands:
             raise AnalysisError(
                 f"All selected Learn payloads in {file_path.name} were empty/all-FF after trimming."
             )
+        emit_progress(
+            progress,
+            f"Manifest group {sample_kind}: kept {len(commands)}, skipped {group_skipped}",
+        )
         loaded_samples.append(
             LoadedSample(
                 sample_kind=sample_kind,
@@ -2371,22 +2441,20 @@ def render_markdown_report(
         "建议：",
     ]
     lines.extend(f"- {item}" for item in readiness["suggestions"])
-"""占位核心模块：提示当前需要从本地历史或备份恢复原始实现。"""
     lines.extend(
         [
-        "",
-        "### 1.4 输入样本",
-        "",
-        "| 分组 | 说明 | Learn 数量 | 来源文件 |",
-        "|---|---|---:|---|",
-    ]
+            "",
+            "### 1.4 输入样本",
+            "",
+            "| 分组 | 说明 | Learn 数量 | 来源文件 |",
+            "|---|---|---:|---|",
+        ]
     )
     for sample in samples:
         source = sample.commands[0].source_file.name if sample.commands else "-"
         lines.append(
             f"| {sample.sample_name} | {escape_pipes(sample.description)} | {len(sample.commands)} | {source} |"
         )
-from __future__ import annotations
     lines.extend(
         [
             "",
@@ -2435,8 +2503,6 @@ from __future__ import annotations
         lines.append(
             f"| {sample.sample_name} | {representative.learn_key} | {escape_pipes(representative.description)} | `{frame_hexes[0] if frame_hexes else '-'}` |"
         )
-class AnalysisError(RuntimeError):
-    """Raised when the protocol analyzer implementation is unavailable."""
     lines.extend(["", "## 3. 字段详解", ""])
     _report_render_field_focus_table(lines, "### 3.1 模式字段候选", mode_items)
     _report_render_field_focus_table(lines, "### 3.2 温度字段候选", temp_items)
@@ -2479,10 +2545,6 @@ class AnalysisError(RuntimeError):
             "| 分组 | Learn | 说明 | Byte0~N |",
             "|---|---|---|---|",
         ]
-def analyze_brand_directory(*_args, **_kwargs):
-    raise AnalysisError(
-        "src/ac_ir_tool/core.py 的原始实现已损坏且本地未找到可恢复副本。"
-        "请先从 IDE Local History、版本控制或手工备份恢复该文件，再继续开发。"
     )
     for command in commands:
         frame_hexes = summarize_command_frames(command)

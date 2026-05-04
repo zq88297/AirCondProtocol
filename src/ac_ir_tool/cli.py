@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 import sys
 
-from .core import analyze_brand_directory
+from .core import AnalysisError, analyze_brand_directory
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,17 +55,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "analyze":
-        analyze_brand_directory(
-            brand_dir=Path(args.brand_dir),
-            output_dir=Path(args.output_dir) if args.output_dir else None,
-            manifest_path=Path(args.manifest) if args.manifest else None,
-            legacy_description=Path(args.legacy_description)
-            if args.legacy_description
-            else None,
-            progress=None if args.quiet else emit_cli_progress,
-        )
-        return 0
+    try:
+        if args.command == "analyze":
+            analyze_brand_directory(
+                brand_dir=Path(args.brand_dir),
+                output_dir=Path(args.output_dir) if args.output_dir else None,
+                manifest_path=Path(args.manifest) if args.manifest else None,
+                legacy_description=Path(args.legacy_description)
+                if args.legacy_description
+                else None,
+                progress=None if args.quiet else emit_cli_progress,
+            )
+            return 0
+    except AnalysisError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     parser.error(f"Unsupported command: {args.command}")
     return 2
