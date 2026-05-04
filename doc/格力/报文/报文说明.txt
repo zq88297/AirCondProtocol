@@ -1,0 +1,1 @@
+Learn1Code是开机制冷、Learn2Code是开机制热、Learn3Code是关机，Learn4Code是制冷降温，Learn5Code是制冷升温，Learn6Code是制热降温，Learn7Code-Learn11Code是制热升温，Learn12Code-Learn16Code是制热降温，Learn17Code-Learn19是制冷降温，Learn20Code-Learn22Code是制冷升温，Learn23Code是切换制冷，Learn24Code是切换制热，Learn25Code是切换制冷，Learn26Code是切换制热，Learn27Code、Learn29Code是关机，Learn28Code、Learn30Code是开机。

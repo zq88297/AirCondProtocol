@@ -1,0 +1,16 @@
+{
+  "samples": {
+    "cool": {
+      "file": "报文/格力制冷样本.txt",
+      "description": "制冷场景，包含开机、模式切换、升温和降温样本"
+    },
+    "heat": {
+      "file": "报文/格力制热样本.txt",
+      "description": "制热场景，包含开机、模式切换、升温和降温样本"
+    },
+    "power_cycle": {
+      "file": "报文/格力冷暖开关机样本.txt",
+      "description": "冷暖模式的开机、关机和再开机场景"
+    }
+  }
+}
